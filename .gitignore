@@ -1,0 +1,21 @@
+# Built binary — anchored to repo root so it never shadows a source directory.
+/aws-ami-cleaner
+/aac
+
+# Go build/test artifacts
+*.exe
+*.test
+*.out
+/dist/
+
+# Local env / credentials
+.env
+*.pem
+
+# Editor noise
+.idea/
+.vscode/
+.DS_Store
+
+# Always keep test fixtures under version control.
+!testdata/**

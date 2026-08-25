@@ -8,12 +8,11 @@ on:
 
 jobs:
   test:
-    runs-on: aws-ami-cleaner
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # The minimal self-hosted runner ships without a C toolchain, and the race
-      # detector needs cgo. Install gcc up front so `-race` can link.
+      # The race detector needs cgo; install gcc up front so `-race` can link.
       - name: Install C toolchain (for -race)
         run: |
           set -eux
@@ -24,8 +23,7 @@ jobs:
           fi
           gcc --version
 
-      # setup-go pulls the official .tar.gz (not .tar.xz), so it works on the
-      # minimal self-hosted runner. Version comes straight from go.mod.
+      # Go version comes straight from go.mod.
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod

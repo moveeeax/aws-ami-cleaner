@@ -1,7 +1,7 @@
 # aws-ami-cleaner
 
 [![ci](https://github.com/moveeeax/aws-ami-cleaner/actions/workflows/ci.yml/badge.svg)](https://github.com/moveeeax/aws-ami-cleaner/actions/workflows/ci.yml)
-[![Go](https://img.shields.io/badge/go-1.24-00ADD8?logo=go&logoColor=white)](go.mod)
+[![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 Deregister stale AMIs and delete their backing EBS snapshots on a retention

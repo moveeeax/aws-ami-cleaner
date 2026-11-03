@@ -6,11 +6,20 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Minimum version from go.mod plus the latest stable release.
+        go: [go.mod, stable]
+    name: test (go ${{ matrix.go }})
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The race detector needs cgo; install gcc up front so `-race` can link.
       - name: Install C toolchain (for -race)
@@ -23,10 +32,11 @@ jobs:
           fi
           gcc --version
 
-      # Go version comes straight from go.mod.
-      - uses: actions/setup-go@v5
+      # Minimum Go version comes straight from go.mod; "stable" tracks the latest release.
+      - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: ${{ matrix.go == 'go.mod' && 'go.mod' || '' }}
+          go-version: ${{ matrix.go != 'go.mod' && matrix.go || '' }}
           cache: true
 
       - name: gofmt (must be clean)

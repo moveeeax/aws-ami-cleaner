@@ -3,6 +3,7 @@ package cleaner
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -142,6 +143,67 @@ func TestPlanUnnamedGroupsIndependently(t *testing.T) {
 	// protects each of them — nothing should be deleted.
 	if len(rep.Delete) != 0 {
 		t.Fatalf("unnamed images grouped together: %v", ids(rep.Delete))
+	}
+}
+
+func TestPlanUnusedFor(t *testing.T) {
+	launched := func(a AMI, daysAgo int) AMI {
+		a.LastLaunched = ref.Add(-day(daysAgo))
+		return a
+	}
+	amis := []AMI{
+		launched(ami("ami-old-busy", "a", 400, 8, nil), 7),   // old, launched weekly
+		launched(ami("ami-old-idle", "b", 400, 8, nil), 120), // old, idle for 120d
+		ami("ami-young-never", "c", 70, 8, nil),              // never launched, 70d old
+		ami("ami-new-never", "d", 10, 8, nil),                // never launched, just built
+	}
+	rep := Plan(amis, nil, Policy{UnusedFor: day(60)}, ref, 0.05)
+	del := ids(rep.Delete)
+	if len(del) != 2 || !del["ami-old-idle"] || !del["ami-young-never"] {
+		t.Fatalf("unexpected deletions: %v", del)
+	}
+
+	// Combined with --older-than, both rules must agree: the 70d image is
+	// unused long enough but not old enough.
+	rep = Plan(amis, nil, Policy{UnusedFor: day(60), OlderThan: day(90)}, ref, 0.05)
+	del = ids(rep.Delete)
+	if len(del) != 1 || !del["ami-old-idle"] {
+		t.Fatalf("unexpected deletions with older-than: %v", del)
+	}
+}
+
+func TestPlanKeepsSharedUnlessIgnored(t *testing.T) {
+	shared := ami("ami-shared", "web", 300, 8, nil)
+	shared.Shared = true
+	amis := []AMI{shared, ami("ami-private", "web", 310, 8, nil)}
+
+	rep := Plan(amis, nil, Policy{OlderThan: day(90)}, ref, 0.05)
+	del := ids(rep.Delete)
+	if len(del) != 1 || !del["ami-private"] {
+		t.Fatalf("shared image not protected: %v", del)
+	}
+	if len(rep.Keep) != 1 || rep.Keep[0].Reason != "shared" {
+		t.Fatalf("want kept reason \"shared\", got %+v", rep.Keep)
+	}
+
+	rep = Plan(amis, nil, Policy{OlderThan: day(90), IgnoreSharing: true}, ref, 0.05)
+	if len(rep.Delete) != 2 {
+		t.Fatalf("IgnoreSharing did not release the shared image: %v", ids(rep.Delete))
+	}
+}
+
+func TestSummaryLastLaunchAndKeptReasons(t *testing.T) {
+	used := ami("ami-1", "web", 300, 8, nil)
+	used.LastLaunched = time.Date(2026, 3, 4, 0, 0, 0, 0, time.UTC)
+	shared := ami("ami-3", "db", 300, 8, nil)
+	shared.Shared = true
+	amis := []AMI{used, ami("ami-2", "web", 310, 8, nil), shared}
+
+	out := Plan(amis, nil, Policy{OlderThan: day(90)}, ref, 0.05).Summary("eu-west-1", true)
+	for _, want := range []string{"LAST LAUNCH", "2026-03-04", "never", "kept: 1 shared"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("summary missing %q:\n%s", want, out)
+		}
 	}
 }
 

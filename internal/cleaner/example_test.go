@@ -26,6 +26,7 @@ func ExamplePlan() {
 		mk("ami-0003", "web", 120, 8), // old, but pinned in-use
 		mk("ami-0004", "web", 200, 8), // deleted
 	}
+	amis[3].LastLaunched = now.Add(-150 * 24 * time.Hour)
 	inUse := map[string]struct{}{"ami-0003": {}}
 	policy := cleaner.Policy{KeepLast: 2, OlderThan: 90 * 24 * time.Hour}
 
@@ -33,6 +34,8 @@ func ExamplePlan() {
 	fmt.Print(rep.Summary("us-east-1", true))
 	// Output:
 	// [DRY-RUN] region=us-east-1: 1 to delete, 3 kept
-	//   DELETE ami-0004 web                          2026-01-13  8GiB  ~$0.40/mo
+	//          ID       NAME                         CREATED     LAST LAUNCH
+	//   DELETE ami-0004 web                          2026-01-13  2026-03-04   8GiB  ~$0.40/mo
+	//   kept: 1 in use (instance/LT/ASG), 2 within keep-last 2
 	//   reclaim: 8GiB  ~$0.40/mo (@ $0.050/GiB-mo)
 }

@@ -14,6 +14,25 @@ Keeps the newest three AMIs per `Name`, and of the rest deletes only those older
 than 90 days. In-use images (running instances, launch templates, ASGs) are never
 listed for deletion.
 
+## Delete what nobody launches anymore
+
+```shell
+aws-ami-cleaner --unused-for 60d --keep-last 2 --dry-run
+```
+
+An old image that a scheduled job still launches every week stays; an image
+nobody has launched in 60 days goes, as long as it is not one of the two newest
+of its `Name`. Images never launched at all count from their creation date.
+
+## Clean a tooling account that shares AMIs
+
+Images shared with other accounts or OUs are kept by default (reason `shared`).
+If you deregister shared images on purpose, opt out:
+
+```shell
+aws-ami-cleaner --older-than 180d --ignore-sharing --dry-run
+```
+
 ## Restrict to a team's images
 
 ```shell

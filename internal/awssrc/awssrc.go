@@ -23,6 +23,7 @@ import (
 // interface keeps the adapter honest and makes the collector unit-testable.
 type EC2API interface {
 	DescribeImages(ctx context.Context, in *ec2.DescribeImagesInput, opts ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error)
+	DescribeImageAttribute(ctx context.Context, in *ec2.DescribeImageAttributeInput, opts ...func(*ec2.Options)) (*ec2.DescribeImageAttributeOutput, error)
 	DescribeSnapshots(ctx context.Context, in *ec2.DescribeSnapshotsInput, opts ...func(*ec2.Options)) (*ec2.DescribeSnapshotsOutput, error)
 	DescribeInstances(ctx context.Context, in *ec2.DescribeInstancesInput, opts ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
 	DescribeLaunchTemplateVersions(ctx context.Context, in *ec2.DescribeLaunchTemplateVersionsInput, opts ...func(*ec2.Options)) (*ec2.DescribeLaunchTemplateVersionsOutput, error)
@@ -40,11 +41,17 @@ type ASGAPI interface {
 type Source struct {
 	EC2 EC2API
 	ASG ASGAPI
+	// SkipSharing skips the per-image launchPermission lookup. Set it only when
+	// the policy ignores sharing, since every image then reports Shared=false.
+	SkipSharing bool
 }
 
 // OwnedImages returns every AMI owned by the calling account together with the
 // sizes of the EBS snapshots in its block device mapping. Snapshot sizes are
 // resolved in a single batched DescribeSnapshots call to stay within rate limits.
+// Unless SkipSharing is set, each image's launch permissions are read as well;
+// a failed lookup fails the run, because guessing "not shared" could delete an
+// image another account launches from.
 func (s *Source) OwnedImages(ctx context.Context) ([]cleaner.AMI, error) {
 	out, err := s.EC2.DescribeImages(ctx, &ec2.DescribeImagesInput{
 		Owners: []string{"self"},
@@ -74,6 +81,17 @@ func (s *Source) OwnedImages(ctx context.Context) ([]cleaner.AMI, error) {
 			Name:    aws.ToString(img.Name),
 			Tags:    tagMap(img.Tags),
 			Created: parseTime(aws.ToString(img.CreationDate)),
+			// DescribeImages carries the same lastLaunchedTime value as the
+			// DescribeImageAttribute call, so no extra request per image.
+			LastLaunched: parseTime(aws.ToString(img.LastLaunchedTime)),
+			Shared:       aws.ToBool(img.Public),
+		}
+		if !s.SkipSharing && !a.Shared {
+			shared, err := s.hasLaunchPermissions(ctx, a.ID)
+			if err != nil {
+				return nil, err
+			}
+			a.Shared = shared
 		}
 		for _, bdm := range img.BlockDeviceMappings {
 			if bdm.Ebs == nil || bdm.Ebs.SnapshotId == nil {
@@ -85,6 +103,20 @@ func (s *Source) OwnedImages(ctx context.Context) ([]cleaner.AMI, error) {
 		amis = append(amis, a)
 	}
 	return amis, nil
+}
+
+// hasLaunchPermissions reports whether an image is shared with any account,
+// organization, OU or group. The owner's own access is implicit and never
+// appears in this list, so any entry means someone else can launch it.
+func (s *Source) hasLaunchPermissions(ctx context.Context, amiID string) (bool, error) {
+	out, err := s.EC2.DescribeImageAttribute(ctx, &ec2.DescribeImageAttributeInput{
+		ImageId:   aws.String(amiID),
+		Attribute: ec2types.ImageAttributeNameLaunchPermission,
+	})
+	if err != nil {
+		return false, fmt.Errorf("describe launch permissions of %s (pass --ignore-sharing to skip this check): %w", amiID, err)
+	}
+	return len(out.LaunchPermissions) > 0, nil
 }
 
 // snapshotSizes resolves each snapshot's VolumeSize (GiB). Missing snapshots

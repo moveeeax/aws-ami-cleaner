@@ -23,11 +23,28 @@ type Snapshot struct {
 
 // AMI is a self-owned Amazon Machine Image plus the snapshots it would orphan.
 type AMI struct {
-	ID        string
-	Name      string
-	Created   time.Time
+	ID      string
+	Name    string
+	Created time.Time
+	// LastLaunched is when EC2 last reported an instance launch from this image.
+	// The zero value means it was never launched (or before April 2017, when EC2
+	// started recording it).
+	LastLaunched time.Time
+	// Shared is true when the image has launch permissions for another account,
+	// an organization or OU, or the public. Other accounts may depend on it even
+	// though nothing in this account references it.
+	Shared    bool
 	Tags      map[string]string
 	Snapshots []Snapshot
+}
+
+// lastUsed is the reference point for UnusedFor: the last launch, or the
+// creation time for an image that was never launched.
+func (a AMI) lastUsed() time.Time {
+	if a.LastLaunched.IsZero() {
+		return a.Created
+	}
+	return a.LastLaunched
 }
 
 // sizeGiB totals the snapshot storage an AMI would release when deleted.
@@ -46,6 +63,11 @@ type Policy struct {
 	KeepLast  int               // keep the newest N images per Name group (0 = off)
 	OlderThan time.Duration     // only images at least this old are candidates (0 = off)
 	TagFilter map[string]string // only images carrying all of these tags are candidates
+	// UnusedFor makes an image a candidate only when it has not been launched for
+	// at least this long; a never-launched image counts from its creation (0 = off).
+	UnusedFor time.Duration
+	// IgnoreSharing lets shared images be deleted. By default they are kept.
+	IgnoreSharing bool
 }
 
 // Deletion is a single AMI the engine decided to remove, with its freed storage.
@@ -161,6 +183,10 @@ func Plan(amis []AMI, inUse map[string]struct{}, p Policy, now time.Time, price 
 				rep.keep(a, "in use (instance/LT/ASG)")
 				continue
 			}
+			if a.Shared && !p.IgnoreSharing {
+				rep.keep(a, "shared")
+				continue
+			}
 			if len(p.TagFilter) > 0 && !matchesTags(a, p.TagFilter) {
 				rep.keep(a, "does not match tag filter")
 				continue
@@ -171,6 +197,10 @@ func Plan(amis []AMI, inUse map[string]struct{}, p Policy, now time.Time, price 
 			}
 			if p.OlderThan > 0 && now.Sub(a.Created) < p.OlderThan {
 				rep.keep(a, "younger than retention age")
+				continue
+			}
+			if p.UnusedFor > 0 && now.Sub(a.lastUsed()) < p.UnusedFor {
+				rep.keep(a, "launched recently")
 				continue
 			}
 			rep.del(a, price)
@@ -228,16 +258,60 @@ func (r *Report) Summary(region string, dryRun bool) string {
 		mode = "DRY-RUN"
 	}
 	fmt.Fprintf(&b, "[%s] region=%s: %d to delete, %d kept\n", mode, region, len(r.Delete), len(r.Keep))
+	if len(r.Delete) > 0 {
+		fmt.Fprintf(&b, "         %-*s %-28s %-10s  %-11s\n", idWidth(r.Delete), "ID", "NAME", "CREATED", "LAST LAUNCH")
+	}
 	for _, d := range r.Delete {
 		name := d.AMI.Name
 		if name == "" {
 			name = "(no name)"
 		}
-		fmt.Fprintf(&b, "  DELETE %s %-28s %s  %dGiB  ~$%.2f/mo\n",
-			d.AMI.ID, truncate(name, 28), d.AMI.Created.UTC().Format("2006-01-02"), d.SizeGiB, d.SavingsUSD)
+		launched := "never"
+		if !d.AMI.LastLaunched.IsZero() {
+			launched = d.AMI.LastLaunched.UTC().Format("2006-01-02")
+		}
+		fmt.Fprintf(&b, "  DELETE %-*s %-28s %s  %-11s  %dGiB  ~$%.2f/mo\n",
+			idWidth(r.Delete), d.AMI.ID, truncate(name, 28), d.AMI.Created.UTC().Format("2006-01-02"), launched, d.SizeGiB, d.SavingsUSD)
+	}
+	if line := keptBreakdown(r.Keep); line != "" {
+		fmt.Fprintf(&b, "  kept: %s\n", line)
 	}
 	fmt.Fprintf(&b, "  reclaim: %dGiB  ~$%.2f/mo (@ $%.3f/GiB-mo)\n", r.TotalGiB, r.TotalSavingsUSD, r.PricePerGiBMonth)
 	return b.String()
+}
+
+// idWidth is the widest AMI ID in the plan, so the ID column lines up with its
+// header whether the account uses 8- or 17-character IDs.
+func idWidth(ds []Deletion) int {
+	w := len("ID")
+	for _, d := range ds {
+		if len(d.AMI.ID) > w {
+			w = len(d.AMI.ID)
+		}
+	}
+	return w
+}
+
+// keptBreakdown counts kept images per reason, e.g. "2 in use (instance/LT/ASG),
+// 1 shared". Reasons are sorted so the line is stable across runs.
+func keptBreakdown(ks []Kept) string {
+	if len(ks) == 0 {
+		return ""
+	}
+	counts := map[string]int{}
+	for _, k := range ks {
+		counts[k.Reason]++
+	}
+	reasons := make([]string, 0, len(counts))
+	for r := range counts {
+		reasons = append(reasons, r)
+	}
+	sort.Strings(reasons)
+	parts := make([]string, 0, len(reasons))
+	for _, r := range reasons {
+		parts = append(parts, fmt.Sprintf("%d %s", counts[r], r))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func truncate(s string, n int) string {

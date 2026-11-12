@@ -37,6 +37,8 @@ func run(args []string, stdin *os.File, stdout *os.File) error {
 		keepLast  = fs.Int("keep-last", 0, "keep the newest N images per Name (0 = disabled)")
 		olderThan = fs.String("older-than", "", "only delete images older than this, e.g. 90d, 2w, 12h (0 = disabled)")
 		tagsFlag  = fs.String("tags", "", "only consider images matching all key=value tags, comma-separated")
+		unusedFor = fs.String("unused-for", "", "only delete images not launched for this long, e.g. 60d; never-launched images count from creation")
+		ignoreShr = fs.Bool("ignore-sharing", false, "allow deleting images shared with other accounts, orgs/OUs or the public")
 		roleARN   = fs.String("assume-role", "", "IAM role ARN to assume before cleaning (multi-account)")
 		price     = fs.Float64("snapshot-price", cleaner.DefaultSnapshotPriceUSD, "EBS snapshot price in $/GiB-month for savings estimate")
 		dryRun    = fs.Bool("dry-run", true, "report only; make no changes")
@@ -52,14 +54,24 @@ func run(args []string, stdin *os.File, stdout *os.File) error {
 	if err != nil {
 		return err
 	}
+	unusedDur, err := cleaner.ParseAge(*unusedFor)
+	if err != nil {
+		return err
+	}
 	tagFilter, err := parseTags(*tagsFlag)
 	if err != nil {
 		return err
 	}
-	policy := cleaner.Policy{KeepLast: *keepLast, OlderThan: olderDur, TagFilter: tagFilter}
+	policy := cleaner.Policy{
+		KeepLast:      *keepLast,
+		OlderThan:     olderDur,
+		TagFilter:     tagFilter,
+		UnusedFor:     unusedDur,
+		IgnoreSharing: *ignoreShr,
+	}
 
-	if *keepLast <= 0 && olderDur == 0 && len(tagFilter) == 0 {
-		return fmt.Errorf("refusing to run with no retention rules: set at least one of --keep-last, --older-than, --tags")
+	if *keepLast <= 0 && olderDur == 0 && unusedDur == 0 && len(tagFilter) == 0 {
+		return fmt.Errorf("refusing to run with no retention rules: set at least one of --keep-last, --older-than, --unused-for, --tags")
 	}
 
 	// --apply flips off the safety default; dry-run stays true otherwise.
@@ -100,6 +112,8 @@ func run(args []string, stdin *os.File, stdout *os.File) error {
 		src := &awssrc.Source{
 			EC2: ec2.NewFromConfig(rc),
 			ASG: autoscaling.NewFromConfig(rc),
+			// No point reading launch permissions the policy will ignore.
+			SkipSharing: *ignoreShr,
 		}
 		amis, err := src.OwnedImages(ctx)
 		if err != nil {

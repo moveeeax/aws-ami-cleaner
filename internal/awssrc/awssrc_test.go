@@ -2,6 +2,8 @@ package awssrc
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -18,13 +20,26 @@ type fakeEC2 struct {
 	snapshots    []ec2types.Snapshot
 	reservations []ec2types.Reservation
 	ltVersions   []ec2types.LaunchTemplateVersion
+	launchPerms  map[string][]ec2types.LaunchPermission // by image ID
+	attrErr      error
 
+	attrCalls    []string
 	deregistered []string
 	deletedSnaps []string
 }
 
 func (f *fakeEC2) DescribeImages(context.Context, *ec2.DescribeImagesInput, ...func(*ec2.Options)) (*ec2.DescribeImagesOutput, error) {
 	return &ec2.DescribeImagesOutput{Images: f.images}, nil
+}
+func (f *fakeEC2) DescribeImageAttribute(_ context.Context, in *ec2.DescribeImageAttributeInput, _ ...func(*ec2.Options)) (*ec2.DescribeImageAttributeOutput, error) {
+	f.attrCalls = append(f.attrCalls, aws.ToString(in.ImageId))
+	if in.Attribute != ec2types.ImageAttributeNameLaunchPermission {
+		return nil, errors.New("unexpected attribute " + string(in.Attribute))
+	}
+	if f.attrErr != nil {
+		return nil, f.attrErr
+	}
+	return &ec2.DescribeImageAttributeOutput{LaunchPermissions: f.launchPerms[aws.ToString(in.ImageId)]}, nil
 }
 func (f *fakeEC2) DescribeSnapshots(_ context.Context, in *ec2.DescribeSnapshotsInput, _ ...func(*ec2.Options)) (*ec2.DescribeSnapshotsOutput, error) {
 	return &ec2.DescribeSnapshotsOutput{Snapshots: f.snapshots}, nil
@@ -94,6 +109,79 @@ func TestOwnedImagesJoinsSnapshotSizesAndTags(t *testing.T) {
 	}
 	if a.Created.Year() != 2026 || a.Created.Month() != 1 {
 		t.Errorf("creation time not parsed: %v", a.Created)
+	}
+}
+
+func TestOwnedImagesLastLaunched(t *testing.T) {
+	f := &fakeEC2{images: []ec2types.Image{
+		{ImageId: aws.String("ami-used"), CreationDate: aws.String("2025-01-01T00:00:00.000Z"), LastLaunchedTime: aws.String("2026-07-15T10:20:30Z")},
+		{ImageId: aws.String("ami-never"), CreationDate: aws.String("2025-01-01T00:00:00.000Z")},
+	}}
+	amis, err := (&Source{EC2: f, SkipSharing: true}).OwnedImages(context.Background())
+	if err != nil {
+		t.Fatalf("OwnedImages: %v", err)
+	}
+	if got := amis[0].LastLaunched; got.Year() != 2026 || got.Month() != 7 || got.Day() != 15 {
+		t.Errorf("last launch not parsed: %v", got)
+	}
+	if !amis[1].LastLaunched.IsZero() {
+		t.Errorf("never-launched image has a last launch: %v", amis[1].LastLaunched)
+	}
+}
+
+func TestOwnedImagesSharing(t *testing.T) {
+	f := &fakeEC2{
+		images: []ec2types.Image{
+			{ImageId: aws.String("ami-account")},
+			{ImageId: aws.String("ami-org")},
+			{ImageId: aws.String("ami-public"), Public: aws.Bool(true)},
+			{ImageId: aws.String("ami-private")},
+		},
+		launchPerms: map[string][]ec2types.LaunchPermission{
+			"ami-account": {{UserId: aws.String("222233334444")}},
+			"ami-org":     {{OrganizationalUnitArn: aws.String("arn:aws:organizations::111122223333:ou/o-abc/ou-xyz")}},
+		},
+	}
+	amis, err := (&Source{EC2: f}).OwnedImages(context.Background())
+	if err != nil {
+		t.Fatalf("OwnedImages: %v", err)
+	}
+	want := map[string]bool{"ami-account": true, "ami-org": true, "ami-public": true, "ami-private": false}
+	for _, a := range amis {
+		if a.Shared != want[a.ID] {
+			t.Errorf("%s: Shared=%v, want %v", a.ID, a.Shared, want[a.ID])
+		}
+	}
+	// A public image is already known to be shared; no lookup needed.
+	for _, id := range f.attrCalls {
+		if id == "ami-public" {
+			t.Errorf("launch permissions looked up for a public image")
+		}
+	}
+}
+
+func TestOwnedImagesSharingLookupFailureFailsRun(t *testing.T) {
+	f := &fakeEC2{
+		images:  []ec2types.Image{{ImageId: aws.String("ami-1")}},
+		attrErr: errors.New("UnauthorizedOperation"),
+	}
+	_, err := (&Source{EC2: f}).OwnedImages(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "--ignore-sharing") {
+		t.Fatalf("want an error pointing at --ignore-sharing, got %v", err)
+	}
+}
+
+func TestOwnedImagesSkipSharing(t *testing.T) {
+	f := &fakeEC2{
+		images:  []ec2types.Image{{ImageId: aws.String("ami-1")}},
+		attrErr: errors.New("must not be called"),
+	}
+	amis, err := (&Source{EC2: f, SkipSharing: true}).OwnedImages(context.Background())
+	if err != nil {
+		t.Fatalf("OwnedImages: %v", err)
+	}
+	if len(f.attrCalls) != 0 || amis[0].Shared {
+		t.Errorf("sharing looked up despite SkipSharing: calls=%v shared=%v", f.attrCalls, amis[0].Shared)
 	}
 }
 

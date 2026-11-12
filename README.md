@@ -15,13 +15,17 @@ anymore and cleans them up without ever risking an image you still need.
 
 ## What it does
 
-- **Retention three ways** — keep the newest N per image name (`--keep-last`),
-  keep anything younger than an age (`--older-than 90d`), and/or restrict to a
-  tag set (`--tags team=payments`). An image is deleted only when **every**
-  enabled rule agrees it's expendable — protection wins ties.
+- **Retention four ways** — keep the newest N per image name (`--keep-last`),
+  keep anything younger than an age (`--older-than 90d`), keep anything
+  launched recently (`--unused-for 60d`), and/or restrict to a tag set
+  (`--tags team=payments`). An image is deleted only when **every** enabled
+  rule agrees it's expendable — protection wins ties.
 - **Never touches in-use AMIs** — running/pending instances, launch template
   `$Latest`/`$Default` versions, and ASG launch configurations are collected
   first and excluded, no matter their age.
+- **Keeps shared AMIs** — an image whose launch permissions include another
+  account, an organization/OU or the public is kept with the reason `shared`,
+  since workload accounts may launch from it. `--ignore-sharing` turns this off.
 - **Cleans up the snapshots too** — after deregistering an image it deletes the
   EBS snapshots from its block device mapping, so you don't leak orphans.
 - **Dry-run with savings** — reports each deletion, total GiB, and estimated
@@ -43,6 +47,15 @@ un-named image is its own group of one.** That means keep-last can never let a
 newer image in one lineage "cover for" an older, unrelated one — a subtle way a
 naive "keep the N newest overall" would delete something it shouldn't.
 
+`--unused-for` reads the `LastLaunchedTime` that EC2 returns with each image.
+EC2 reports a launch with up to a 24-hour delay and has recorded it only since
+April 2017, so an image last launched before that shows `never` and is aged
+from its creation date.
+
+Sharing is read per image with `DescribeImageAttribute(launchPermission)`. If
+that call fails (for example, the permission is missing), the run stops instead
+of treating the image as unshared.
+
 ## Install
 
 ```shell
@@ -57,7 +70,9 @@ aws-ami-cleaner --keep-last 3 --older-than 90d --dry-run
 
 ```text
 [DRY-RUN] region=us-east-1: 1 to delete, 3 kept
-  DELETE ami-0af12... web-base-2025-12       2026-01-13  8GiB  ~$0.40/mo
+         ID                    NAME                         CREATED     LAST LAUNCH
+  DELETE ami-0af1234567890abcd web-base-2025-12             2026-01-13  2026-02-20   8GiB  ~$0.40/mo
+  kept: 3 within keep-last 3
   reclaim: 8GiB  ~$0.40/mo (@ $0.050/GiB-mo)
 
 TOTAL: 1 images, 8GiB, ~$0.40/mo across 1 region(s)
@@ -71,7 +86,9 @@ confirm; add `--yes` for automation). More recipes in [`examples/`](examples/).
 | --- | --- |
 | `--keep-last N` | keep the newest N images per `Name` |
 | `--older-than D` | only delete images older than `D` (`90d`, `2w`, `12h`) |
+| `--unused-for D` | only delete images not launched for `D`; a never-launched image counts from its creation |
 | `--tags k=v,...` | only consider images matching all tags |
+| `--ignore-sharing` | also delete images shared with other accounts, orgs/OUs or the public |
 | `--regions a,b` | clean these regions (default: resolved region) |
 | `--assume-role ARN` | assume a role first (cross-account) |
 | `--snapshot-price F` | `$/GiB-month` for the savings estimate |
@@ -79,6 +96,7 @@ confirm; add `--yes` for automation). More recipes in [`examples/`](examples/).
 
 Credentials use the standard AWS chain (env, shared config, SSO, instance
 profile). The IAM identity needs `ec2:DescribeImages`, `ec2:DescribeSnapshots`,
+`ec2:DescribeImageAttribute` (unless `--ignore-sharing`),
 `ec2:DescribeInstances`, `ec2:DescribeLaunchTemplateVersions`,
 `autoscaling:DescribeLaunchConfigurations`, and — for `--apply` —
 `ec2:DeregisterImage` and `ec2:DeleteSnapshot`.
